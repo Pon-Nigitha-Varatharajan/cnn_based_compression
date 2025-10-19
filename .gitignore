@@ -1,0 +1,31 @@
+# Byte-compiled / optimized / DLL files
+__pycache__/
+*.py[cod]
+*$py.class
+
+# Virtual environment
+myenv/
+venv/
+.env/
+
+# Jupyter Notebook checkpoints
+.ipynb_checkpoints/
+
+# PyTorch model files (use Git LFS for these instead of committing directly)
+checkpoints/*.pth
+
+# Output images / results
+outputs/
+results/
+reports/
+
+# Data folder (if large)
+data/
+
+# Logs
+*.log
+
+# OS-specific
+.DS_Store
+Thumbs.db
+checkpoints/
