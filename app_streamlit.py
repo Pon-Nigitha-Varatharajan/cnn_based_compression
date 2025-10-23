@@ -50,8 +50,8 @@ def load_models():
         st.error(f"Error: {e}")
         return None, None
 
-def process_image(img, com_cnn, rec_cnn, quality):
-    """Process image through compression pipeline"""
+def process_image(img, com_cnn, rec_cnn):
+    """Process image through compression pipeline with fixed quality=100"""
     try:
         # Convert PIL to numpy
         img_np = np.array(img, dtype=np.float32) / 255.0
@@ -72,9 +72,9 @@ def process_image(img, com_cnn, rec_cnn, quality):
         compressed_np = compressed_tensor.squeeze(0).permute(1, 2, 0).cpu().numpy()
         compressed_np = np.clip(compressed_np, 0, 1)
         
-        # JPEG compression
+        # JPEG compression with FIXED quality=100
         compressed_uint8 = (compressed_np * 255).astype(np.uint8)
-        compressed_jpeg = jpeg_codec(compressed_uint8, quality)
+        compressed_jpeg = jpeg_codec(compressed_uint8, 100)  # Fixed at maximum quality
         
         # Upsample if needed
         if compressed_jpeg.shape[:2] != (h_orig, w_orig):
@@ -116,13 +116,16 @@ st.set_page_config(
 )
 
 st.title("🖼️ CNN Image Compression Demo")
-st.markdown("Compress images using ComCNN + JPEG and reconstruct with RecCNN")
+st.markdown("Compress images using ComCNN + JPEG (Quality=100) and reconstruct with RecCNN")
 
 # Sidebar
 with st.sidebar:
     st.header("Settings")
-    quality = st.slider("JPEG Quality", 1, 100, 10, 
-                       help="Lower values = more compression, higher = better quality")
+    
+    # Fixed quality - no slider
+    quality = 50  # Fixed at maximum quality
+    st.info(f"**JPEG Quality: {quality}** (Fixed)")
+    st.write("**Mode**: Maximum Quality Testing")
     
     st.header("Model Info")
     st.info(f"Device: {device}")
@@ -146,7 +149,7 @@ if uploaded_file:
     # Process image
     with st.spinner("Processing image..."):
         start_time = time.time()
-        compressed_img, rec_img, psnr_val, ssim_val = process_image(img, com_cnn, rec_cnn, quality)
+        compressed_img, rec_img, psnr_val, ssim_val = process_image(img, com_cnn, rec_cnn)  # Removed quality parameter
         processing_time = time.time() - start_time
     
     # Display results
@@ -160,7 +163,7 @@ if uploaded_file:
     with col2:
         st.subheader("Compressed")
         st.image(compressed_img, use_container_width=True)
-        st.caption("After ComCNN + JPEG")
+        st.caption("After ComCNN + JPEG (Quality=100)")
     
     with col3:
         st.subheader("Reconstructed")
@@ -210,9 +213,10 @@ else:
     st.info("👆 Upload an image to start compression")
     st.write("**How it works:**")
     st.write("1. **ComCNN** compresses the image (learned compression)")
-    st.write("2. **JPEG** further compresses the output")
+    st.write("2. **JPEG** compresses with maximum quality (100)")
     st.write("3. **RecCNN** reconstructs the high-quality image")
     st.write("4. **Metrics** evaluate the reconstruction quality")
+    st.warning("**Note**: JPEG Quality is fixed at 100 for maximum quality testing")
 
 # Footer
 st.markdown("---")
