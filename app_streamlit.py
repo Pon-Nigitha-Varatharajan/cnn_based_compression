@@ -5,6 +5,14 @@ import numpy as np
 from PIL import Image
 import io
 import time
+import os
+
+# Set page config MUST be at the very top
+st.set_page_config(
+    page_title="CNN Image Compression", 
+    layout="wide", 
+    page_icon="🖼️"
+)
 
 # Import models
 try:
@@ -22,70 +30,93 @@ device = torch.device("mps" if torch.backends.mps.is_available() else "cuda" if 
 def load_models():
     """Load the best available models"""
     try:
-        device = torch.device("mps" if torch.backends.mps.is_available() else "cpu")
         com_cnn = ComCNN().to(device)
         rec_cnn = RecCNN().to(device)
         
-        # Try enhanced models first, then regular
+        # Try to load models
         model_attempts = [
-            ('checkpoints/comcnn_enhanced.pth', 'checkpoints/reccnn_enhanced.pth', 'enhanced'),
-            ('checkpoints/comcnn.pth', 'checkpoints/reccnn.pth', 'standard'),
+            ('checkpoints/comcnn.pth', 'checkpoints/reccnn.pth'),
+            ('checkpoints/comcnn_enhanced.pth', 'checkpoints/reccnn_enhanced.pth'),
         ]
         
-        for com_path, rec_path, model_type in model_attempts:
+        for com_path, rec_path in model_attempts:
             try:
-                com_cnn.load_state_dict(torch.load(com_path, map_location=device))
-                rec_cnn.load_state_dict(torch.load(rec_path, map_location=device))
-                st.success(f"✓ Loaded {model_type} models")
-                com_cnn.eval()
-                rec_cnn.eval()
-                return com_cnn, rec_cnn
-            except:
+                if os.path.exists(com_path) and os.path.exists(rec_path):
+                    com_cnn.load_state_dict(torch.load(com_path, map_location=device))
+                    rec_cnn.load_state_dict(torch.load(rec_path, map_location=device))
+                    st.success(f"✓ Loaded models from {com_path}")
+                    com_cnn.eval()
+                    rec_cnn.eval()
+                    return com_cnn, rec_cnn
+            except Exception as e:
+                st.warning(f"Could not load {com_path}: {e}")
                 continue
         
-        st.error("❌ Could not load any models")
+        st.error("❌ Could not load any models. Please train models first.")
         return None, None
         
     except Exception as e:
-        st.error(f"Error: {e}")
+        st.error(f"Error loading models: {e}")
         return None, None
 
-def process_image(img, com_cnn, rec_cnn):
-    """Process image through compression pipeline with fixed quality=100"""
+def calculate_compression_ratio(original_img, compressed_img, quality=50):
+    """Calculate accurate compression ratio"""
+    # Original size
+    original_buffer = io.BytesIO()
+    original_img.save(original_buffer, format="PNG")
+    original_size = len(original_buffer.getvalue())
+    
+    # Compressed size (using same quality as processing)
+    compressed_buffer = io.BytesIO()
+    compressed_img.save(compressed_buffer, format="JPEG", quality=quality)
+    compressed_size = len(compressed_buffer.getvalue())
+    
+    if compressed_size > 0:
+        return original_size / compressed_size
+    return 1.0
+
+def process_image(img, com_cnn, rec_cnn, quality=50):
+    """Process image through compression pipeline"""
     try:
         # Convert PIL to numpy
         img_np = np.array(img, dtype=np.float32) / 255.0
         h_orig, w_orig = img_np.shape[:2]
         
-        # Ensure divisible by 2 for ComCNN
+        # Store original for metrics
+        original_np = img_np.copy()
+
+        # Ensure divisible by 2 for ComCNN (due to stride=2)
         if h_orig % 2 != 0 or w_orig % 2 != 0:
             h_new = h_orig - (h_orig % 2)
             w_new = w_orig - (w_orig % 2)
             img_np = img_np[:h_new, :w_new, :]
+            h_orig, w_orig = h_new, w_new
 
         # Compression stage
         img_tensor = torch.from_numpy(img_np).permute(2, 0, 1).unsqueeze(0).to(device)
         
         with torch.no_grad():
-            compressed_tensor = com_cnn(img_tensor)
+            compressed_tensor = com_cnn(img_tensor)  # This downscales by 2
         
-        compressed_np = compressed_tensor.squeeze(0).permute(1, 2, 0).cpu().numpy()
+        # Scale compressed output back to original size for JPEG
+        compressed_up = torch.nn.functional.interpolate(
+            compressed_tensor, 
+            size=(h_orig, w_orig), 
+            mode='bilinear', 
+            align_corners=False
+        )
+        
+        compressed_np = compressed_up.squeeze(0).permute(1, 2, 0).cpu().numpy()
         compressed_np = np.clip(compressed_np, 0, 1)
         
-        # JPEG compression with FIXED quality=100
+        # JPEG compression with specified quality
         compressed_uint8 = (compressed_np * 255).astype(np.uint8)
-        compressed_jpeg = jpeg_codec(compressed_uint8, 100)  # Fixed at maximum quality
+        compressed_jpeg = jpeg_codec(compressed_uint8, quality)
         
-        # Upsample if needed
-        if compressed_jpeg.shape[:2] != (h_orig, w_orig):
-            compressed_up = cv2.resize(compressed_jpeg, (w_orig, h_orig), interpolation=cv2.INTER_CUBIC)
-        else:
-            compressed_up = compressed_jpeg.copy()
-        
-        compressed_img = Image.fromarray(compressed_up)
+        compressed_img = Image.fromarray(compressed_jpeg)
         
         # Reconstruction stage
-        rec_input_np = compressed_up.astype(np.float32) / 255.0
+        rec_input_np = compressed_jpeg.astype(np.float32) / 255.0
         rec_tensor = torch.from_numpy(rec_input_np).permute(2, 0, 1).unsqueeze(0).to(device)
         
         with torch.no_grad():
@@ -96,41 +127,48 @@ def process_image(img, com_cnn, rec_cnn):
         rec_uint8 = (rec_np * 255).astype(np.uint8)
         rec_img = Image.fromarray(rec_uint8)
         
-        # Calculate metrics
-        psnr_val = psnr_torch(
-            torch.from_numpy(rec_np).permute(2, 0, 1).unsqueeze(0).to(device),
-            torch.from_numpy(img_np).permute(2, 0, 1).unsqueeze(0).to(device)
-        )
-        ssim_val = ssim_numpy(rec_np, img_np)
+        # Calculate metrics - ensure same dimensions
+        min_h = min(rec_np.shape[0], img_np.shape[0])
+        min_w = min(rec_np.shape[1], img_np.shape[1])
         
-        return compressed_img, rec_img, psnr_val, ssim_val
+        rec_np_crop = rec_np[:min_h, :min_w]
+        img_np_crop = img_np[:min_h, :min_w]
+        
+        psnr_val = psnr_torch(
+            torch.from_numpy(rec_np_crop).permute(2, 0, 1).unsqueeze(0).to(device),
+            torch.from_numpy(img_np_crop).permute(2, 0, 1).unsqueeze(0).to(device)
+        )
+        ssim_val = ssim_numpy(rec_np_crop, img_np_crop)
+        
+        # Calculate compression ratio
+        compression_ratio = calculate_compression_ratio(img, compressed_img, quality)
+        
+        return compressed_img, rec_img, psnr_val, ssim_val, compression_ratio
         
     except Exception as e:
         raise Exception(f"Image processing error: {str(e)}")
 
 # Streamlit UI
-st.set_page_config(
-    page_title="CNN Image Compression", 
-    layout="wide", 
-    page_icon="🖼️"
-)
-
 st.title("🖼️ CNN Image Compression Demo")
-st.markdown("Compress images using ComCNN + JPEG (Quality=100) and reconstruct with RecCNN")
+st.markdown("Compress images using ComCNN + JPEG and reconstruct with RecCNN")
 
 # Sidebar
 with st.sidebar:
     st.header("Settings")
     
-    # Fixed quality - no slider
-    quality = 50  # Fixed at maximum quality
-    st.info(f"**JPEG Quality: {quality}** (Fixed)")
-    st.write("**Mode**: Maximum Quality Testing")
+    # Quality slider
+    quality = st.slider("JPEG Quality", min_value=10, max_value=100, value=50, 
+                       help="Lower quality = higher compression")
     
     st.header("Model Info")
     st.info(f"Device: {device}")
-    st.write("**ComCNN**: 3-layer compression network")
+    st.write("**ComCNN**: 3-layer compression network (downscales by 2)")
     st.write("**RecCNN**: 20-layer reconstruction network")
+    
+    st.header("Pipeline")
+    st.write("1. **ComCNN**: Learned compression + downscaling")
+    st.write("2. **JPEG**: Traditional compression")
+    st.write("3. **RecCNN**: Learned reconstruction")
 
 # Main content
 uploaded_file = st.file_uploader("Upload an image", type=["png", "jpg", "jpeg"])
@@ -149,8 +187,14 @@ if uploaded_file:
     # Process image
     with st.spinner("Processing image..."):
         start_time = time.time()
-        compressed_img, rec_img, psnr_val, ssim_val = process_image(img, com_cnn, rec_cnn)  # Removed quality parameter
-        processing_time = time.time() - start_time
+        try:
+            compressed_img, rec_img, psnr_val, ssim_val, compression_ratio = process_image(
+                img, com_cnn, rec_cnn, quality
+            )
+            processing_time = time.time() - start_time
+        except Exception as e:
+            st.error(f"Processing failed: {e}")
+            st.stop()
     
     # Display results
     col1, col2, col3 = st.columns(3)
@@ -163,7 +207,7 @@ if uploaded_file:
     with col2:
         st.subheader("Compressed")
         st.image(compressed_img, use_container_width=True)
-        st.caption("After ComCNN + JPEG (Quality=100)")
+        st.caption(f"After ComCNN + JPEG (Quality={quality})")
     
     with col3:
         st.subheader("Reconstructed")
@@ -172,15 +216,20 @@ if uploaded_file:
     
     # Metrics
     st.subheader("Quality Metrics")
-    col_psnr, col_ssim, col_time = st.columns(3)
+    col_psnr, col_ssim, col_ratio, col_time = st.columns(4)
     
     with col_psnr:
         st.metric("PSNR", f"{psnr_val:.2f} dB", 
                  help="Peak Signal-to-Noise Ratio (higher is better)")
+        st.write("**Quality:** " + ("GOOD" if psnr_val > 28 else "AVERAGE" if psnr_val > 25 else "POOR"))
     
     with col_ssim:
         st.metric("SSIM", f"{ssim_val:.4f}",
                  help="Structural Similarity Index (higher is better)")
+    
+    with col_ratio:
+        st.metric("Compression Ratio", f"{compression_ratio:.2f}:1",
+                 help="Original size : Compressed size")
     
     with col_time:
         st.metric("Processing Time", f"{processing_time:.2f}s")
@@ -201,7 +250,7 @@ if uploaded_file:
     
     with col_dl2:
         buf_comp = io.BytesIO()
-        compressed_img.save(buf_comp, format="JPEG", quality=95)
+        compressed_img.save(buf_comp, format="JPEG", quality=quality)
         st.download_button(
             label="📥 Download Compressed Image",
             data=buf_comp.getvalue(),
@@ -211,12 +260,10 @@ if uploaded_file:
 
 else:
     st.info("👆 Upload an image to start compression")
-    st.write("**How it works:**")
-    st.write("1. **ComCNN** compresses the image (learned compression)")
-    st.write("2. **JPEG** compresses with maximum quality (100)")
-    st.write("3. **RecCNN** reconstructs the high-quality image")
-    st.write("4. **Metrics** evaluate the reconstruction quality")
-    st.warning("**Note**: JPEG Quality is fixed at 100 for maximum quality testing")
+    st.write("**Expected Results:**")
+    st.write("- **Compressed image**: Should show visible but minor quality loss")
+    st.write("- **Reconstructed image**: Should be similar to original with PSNR > 25 dB")
+    st.write("- **Compression ratio**: Should be reasonable (2:1 to 20:1 depending on quality)")
 
 # Footer
 st.markdown("---")

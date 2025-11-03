@@ -20,6 +20,6 @@ class ComCNN(nn.Module):
 
     def forward(self, x):
         x = self.layer1(x)
-        x = self.layer2(x)  # This downscales by 2
+        x = self.layer2(x)  # This downscales by 2: 40x40 -> 20x20
         x = self.layer3(x)
         return x

@@ -9,11 +9,12 @@ import os
 from models.comcnn import ComCNN
 from models.reccnn import RecCNN
 from utils.dataset import ImagePatchDataset
+from utils.codec import psnr_torch
 
 def main():
     parser = argparse.ArgumentParser(description='Train CNN Compression Models')
     parser.add_argument('--data_dir', type=str, default='./data/Set5', help='Dataset directory')
-    parser.add_argument('--epochs', type=int, default=50, help='Number of epochs')
+    parser.add_argument('--epochs', type=int, default=40, help='Number of epochs')
     parser.add_argument('--batch_size', type=int, default=16, help='Batch size')
     parser.add_argument('--patch_size', type=int, default=40, help='Patch size')
     parser.add_argument('--stride', type=int, default=20, help='Stride for patch extraction')
@@ -52,18 +53,26 @@ def main():
         rec_cnn.train()
         
         total_loss = 0
+        total_psnr = 0
         progress_bar = tqdm(dataloader, desc=f'Epoch {epoch+1}/{args.epochs}')
         
         for batch_idx, images in enumerate(progress_bar):
             images = images.to(device)
             
-            # Forward pass
-            compressed = com_cnn(images)
+            # Forward pass through ComCNN (this downscales by 2)
+            compressed = com_cnn(images)  # Output: [batch, 3, 20, 20] from [batch, 3, 40, 40]
+            
+            # Upscale compressed output back to original size for reconstruction
             compressed_up = F.interpolate(compressed, size=images.shape[2:], mode='bilinear', align_corners=False)
+            
+            # Reconstruction
             reconstructed = rec_cnn(compressed_up)
             
-            # Calculate loss
+            # Calculate loss - both tensors are now same size
             loss = criterion(reconstructed, images)
+            
+            # Calculate PSNR
+            psnr_val = psnr_torch(reconstructed, images)
             
             # Backward pass
             optimizer.zero_grad()
@@ -71,10 +80,15 @@ def main():
             optimizer.step()
             
             total_loss += loss.item()
-            progress_bar.set_postfix({'loss': f'{loss.item():.6f}'})
+            total_psnr += psnr_val.item()
+            progress_bar.set_postfix({
+                'loss': f'{loss.item():.6f}',
+                'psnr': f'{psnr_val.item():.2f}dB'
+            })
         
         avg_loss = total_loss / len(dataloader)
-        print(f'Epoch {epoch+1}/{args.epochs}, Average Loss: {avg_loss:.6f}')
+        avg_psnr = total_psnr / len(dataloader)
+        print(f'Epoch {epoch+1}/{args.epochs}, Average Loss: {avg_loss:.6f}, Average PSNR: {avg_psnr:.2f}dB')
         
         # Save checkpoint
         if (epoch + 1) % args.save_interval == 0 or epoch == args.epochs - 1:
